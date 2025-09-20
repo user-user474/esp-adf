@@ -307,22 +307,24 @@ esp_err_t es8388_init(audio_hal_codec_config_t *cfg)
     } else {
         tmp = DAC_OUTPUT_LOUT1 | DAC_OUTPUT_LOUT2 | DAC_OUTPUT_ROUT1 | DAC_OUTPUT_ROUT2;
     }
-    res |= es_write_reg(ES8388_ADDR, ES8388_DACPOWER, tmp);  // 0x3c Enable DAC and Enable Lout/Rout/1/2
+    res |= es_write_reg(ES8388_ADDR, ES8388_DACPOWER, tmp);  // Enable DAC and Enable Lout/Rout/1/2
+
     /* adc */
     res |= es_write_reg(ES8388_ADDR, ES8388_ADCPOWER, 0xFF);
     res |= es_write_reg(ES8388_ADDR, ES8388_ADCCONTROL1, 0xbb);  // MIC Left and Right channel PGA gain
-    tmp = 0;
-    if (AUDIO_HAL_ADC_INPUT_LINE1 == cfg->adc_input) {
-        tmp = ADC_INPUT_LINPUT1_RINPUT1;
-    } else if (AUDIO_HAL_ADC_INPUT_LINE2 == cfg->adc_input) {
-        tmp = ADC_INPUT_LINPUT2_RINPUT2;
-    } else {
-        tmp = ADC_INPUT_DIFFERENCE;
-    }
-    res |= es_write_reg(ES8388_ADDR, ES8388_ADCCONTROL2, tmp);  // 0x00 LINSEL & RINSEL, LIN1/RIN1 as ADC Input; DSSEL,use one DS Reg11; DSR, LINPUT1-RINPUT1
+
+    // Force LINE2 input
+    tmp = ADC_INPUT_LINPUT2_RINPUT2;  
+    res |= es_write_reg(ES8388_ADDR, ES8388_ADCCONTROL2, tmp);  
+
     res |= es_write_reg(ES8388_ADDR, ES8388_ADCCONTROL3, 0x02);
     res |= es_write_reg(ES8388_ADDR, ES8388_ADCCONTROL4, 0x0c);  // 16 Bits length and I2S serial audio data format
-    res |= es_write_reg(ES8388_ADDR, ES8388_ADCCONTROL5, 0x02);  // ADCFsMode,singel SPEED,RATIO=256
+    res |= es_write_reg(ES8388_ADDR, ES8388_ADCCONTROL5, 0x02);  // ADCFsMode, single SPEED, RATIO=256
+
+    // Set ADC gain/volume
+    res |= es8388_set_adc_dac_volume(ES_MODULE_ADC, 0, 0);    // 0dB
+    res |= es_write_reg(ES8388_ADDR, ES8388_ADCPOWER, 0x09);  // Power on ADC, enable LINE2, power off MICBIAS
+
     // ALC for Microphone
     res |= es8388_set_adc_dac_volume(ES_MODULE_ADC, 0, 0);    // 0db
     res |= es_write_reg(ES8388_ADDR, ES8388_ADCPOWER, 0x09);  // Power on ADC, enable LIN&RIN, power off MICBIAS, and set int1lp to low power mode
@@ -531,7 +533,7 @@ int es8388_ctrl_state(audio_hal_codec_mode_t mode, audio_hal_ctrl_t ctrl_state)
     int es_mode_t = 0;
     switch (mode) {
         case AUDIO_HAL_CODEC_MODE_ENCODE:
-            es_mode_t  = ES_MODULE_ADC;
+            es_mode_t  = ES_MODULE_LINE;
             break;
         case AUDIO_HAL_CODEC_MODE_LINE_IN:
             es_mode_t  = ES_MODULE_LINE;
