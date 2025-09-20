@@ -1,5 +1,6 @@
-name: Build MicroPython ADF
+name: Build MicroPython ADF Firmware
 
+# Trigger on push to main or manual run
 on:
   push:
     branches: [ main ]
@@ -10,33 +11,33 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # Step 1: Checkout your fork with submodules
     - name: Checkout code
       uses: actions/checkout@v3
       with:
         submodules: true
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: 3.10
-
+    # Step 2: Install dependencies for ESP-IDF
     - name: Install ESP-IDF dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y git wget flex bison gperf python3-pip python3-setuptools cmake ninja-build ccache libffi-dev libssl-dev dfu-util
 
+    # Step 3: Clone ESP-IDF v4.4 and set environment
     - name: Get ESP-IDF
       run: |
         git clone -b release/v4.4 --recursive https://github.com/espressif/esp-idf.git $HOME/esp-idf
         echo "$HOME/esp-idf/export.sh" >> $GITHUB_ENV
 
-    - name: Build firmware
+    # Step 4: Build the firmware
+    - name: Build MicroPython ADF firmware
       run: |
         source $HOME/esp-idf/export.sh
         cd micropython_adf/ports/esp32
         idf.py set-target esp32
         idf.py build
 
+    # Step 5: Upload firmware.bin as artifact
     - name: Upload firmware artifact
       uses: actions/upload-artifact@v3
       with:
