@@ -1,45 +1,45 @@
 name: Build MicroPython ADF Firmware
 
-# Trigger on push to main or manual run
 on:
   push:
-    branches: [ main ]
+    branches:
+      - master
   workflow_dispatch:
 
 jobs:
-  build:
+  build_firmware:
     runs-on: ubuntu-latest
 
     steps:
-    # Step 1: Checkout your fork with submodules
-    - name: Checkout code
+    - name: Checkout repository
       uses: actions/checkout@v3
-      with:
-        submodules: true
 
-    # Step 2: Install dependencies for ESP-IDF
-    - name: Install ESP-IDF dependencies
+    - name: Set up Python 3
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y git wget flex bison gperf python3-pip python3-setuptools cmake ninja-build ccache libffi-dev libssl-dev dfu-util
 
-    # Step 3: Clone ESP-IDF v4.4 and set environment
-    - name: Get ESP-IDF
-      run: |
-        git clone -b release/v4.4 --recursive https://github.com/espressif/esp-idf.git $HOME/esp-idf
-        echo "$HOME/esp-idf/export.sh" >> $GITHUB_ENV
+    - name: Setup ESP-IDF
+      uses: espressif/esp-idf-action@v2
+      with:
+        version: 'release/v5.1'
 
-    # Step 4: Build the firmware
-    - name: Build MicroPython ADF firmware
-      run: |
-        source $HOME/esp-idf/export.sh
-        cd micropython_adf/ports/esp32
-        idf.py set-target esp32
-        idf.py build
+    - name: Export ESP-IDF environment
+      run: . $HOME/.espressif/esp-idf/export.sh
 
-    # Step 5: Upload firmware.bin as artifact
+    - name: Configure project
+      run: idf.py set-target esp32  # change target if needed
+
+    - name: Build firmware
+      run: idf.py build
+
     - name: Upload firmware artifact
       uses: actions/upload-artifact@v3
       with:
         name: firmware
-        path: micropython_adf/ports/esp32/build/firmware.bin
+        path: build/firmware.bin
