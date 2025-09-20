@@ -1,0 +1,44 @@
+name: Build MicroPython ADF
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        submodules: true
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.10
+
+    - name: Install ESP-IDF dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git wget flex bison gperf python3-pip python3-setuptools cmake ninja-build ccache libffi-dev libssl-dev dfu-util
+
+    - name: Get ESP-IDF
+      run: |
+        git clone -b release/v4.4 --recursive https://github.com/espressif/esp-idf.git $HOME/esp-idf
+        echo "$HOME/esp-idf/export.sh" >> $GITHUB_ENV
+
+    - name: Build firmware
+      run: |
+        source $HOME/esp-idf/export.sh
+        cd micropython_adf/ports/esp32
+        idf.py set-target esp32
+        idf.py build
+
+    - name: Upload firmware artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: firmware
+        path: micropython_adf/ports/esp32/build/firmware.bin
