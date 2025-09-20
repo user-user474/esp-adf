@@ -25,7 +25,9 @@ jobs:
         with:
           esp_idf_version: v4.4
           target: esp32
-          path: ./  # adjust if your ESP-IDF project is in a subfolder
+
+      - name: Export ESP-IDF environment
+        run: . $HOME/.espressif/esp-idf/export.sh
 
       - name: Install dependencies
         run: |
