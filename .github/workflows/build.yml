@@ -1,35 +1,414 @@
-name: Build Slim MicroPython ADF Firmware
+name: ESP32 MicroPython ADF Build
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main, master, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      target_board:
+        description: 'Target board'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - esp32
+          - esp32s2
+          - esp32s3
+          - esp32c3
+
+env:
+  IDF_PATH: ${{ github.workspace }}/esp-idf
+  ADF_PATH: ${{ github.workspace }}/esp-adf
+  MICROPYTHON_PATH: ${{ github.workspace }}/micropython
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
+  TARGET_BOARD: ${{ github.event.inputs.target_board || 'all' }}
 
 jobs:
-  build_firmware:
+  setup:
     runs-on: ubuntu-latest
-
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      version: ${{ steps.version.outputs.version }}
+      build_date: ${{ steps.version.outputs.build_date }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Setup ESP-IDF
-        uses: espressif/esp-idf-action@v3
+        uses: actions/checkout@v4
         with:
-          version: v5.3.2  # Change to the ESP-IDF version your ADF requires
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Install minimal Python dependencies
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          if [ "${{ env.TARGET_BOARD }}" = "all" ]; then
+            echo "matrix=[\"esp32\", \"esp32s2\", \"esp32s3\", \"esp32c3\"]" >> $GITHUB_OUTPUT
+          else
+            echo "matrix=[\"${{ env.TARGET_BOARD }}\"]" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate version info
+        id: version
+        run: |
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION="${GITHUB_SHA:0:8}"
+          fi
+          BUILD_DATE=$(date -u +'%Y-%m-%d_%H-%M-%S')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "Build version: $VERSION"
+          echo "Build date: $BUILD_DATE"
+
+  build:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.setup.outputs.matrix) }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Cache ESP-IDF
+        id: cache-idf
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/esp-idf
+            ~/.espressif
+          key: ${{ runner.os }}-esp-idf-${{ hashFiles('**/sdkconfig*', '**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-esp-idf-
+
+      - name: Install ESP-IDF
+        if: steps.cache-idf.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget flex bison gperf python3 python3-pip python3-setuptools cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+          
+          # Clone ESP-IDF
+          git clone --recursive --branch v5.1.2 https://github.com/espressif/esp-idf.git $IDF_PATH
+          cd $IDF_PATH
+          ./install.sh ${{ matrix.target }}
+
+      - name: Setup ESP-IDF environment
+        run: |
+          cd $IDF_PATH
+          source ./export.sh
+          echo "IDF_PATH=$IDF_PATH" >> $GITHUB_ENV
+          echo "PATH=$PATH" >> $GITHUB_ENV
+          echo "$IDF_PATH/tools" >> $GITHUB_PATH
+
+      - name: Cache ESP-ADF
+        id: cache-adf
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.ADF_PATH }}
+          key: ${{ runner.os }}-esp-adf-${{ hashFiles('**/component.mk', '**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-esp-adf-
+
+      - name: Install ESP-ADF
+        if: steps.cache-adf.outputs.cache-hit != 'true'
+        run: |
+          git clone --recursive --branch v2.6 https://github.com/espressif/esp-adf.git $ADF_PATH
+
+      - name: Cache MicroPython
+        id: cache-micropython
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.MICROPYTHON_PATH }}
+          key: ${{ runner.os }}-micropython-${{ hashFiles('**/Makefile', '**/mpconfigport.h') }}
+          restore-keys: |
+            ${{ runner.os }}-micropython-
+
+      - name: Install MicroPython
+        if: steps.cache-micropython.outputs.cache-hit != 'true'
+        run: |
+          git clone --recursive --branch v1.21.0 https://github.com/micropython/micropython.git $MICROPYTHON_PATH
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyserial
+          pip install esptool pyserial cryptography
+
+      - name: Build MicroPython cross compiler
+        run: |
+          cd $MICROPYTHON_PATH/mpy-cross
+          make
+
+      - name: Configure build
+        run: |
+          cd $MICROPYTHON_PATH/ports/esp32
+          
+          # Copy ADF components
+          mkdir -p components
+          cp -r $ADF_PATH/components/* components/ || true
+          
+          # Set up board configuration
+          case "${{ matrix.target }}" in
+            esp32)
+              BOARD="ESP32_GENERIC"
+              ;;
+            esp32s2)
+              BOARD="ESP32_GENERIC_S2"
+              ;;
+            esp32s3)
+              BOARD="ESP32_GENERIC_S3"
+              ;;
+            esp32c3)
+              BOARD="ESP32_GENERIC_C3"
+              ;;
+          esac
+          
+          echo "Building for board: $BOARD"
+          echo "BOARD=$BOARD" >> $GITHUB_ENV
 
       - name: Build firmware
         run: |
-          idf.py set-target esp32
-          idf.py build
+          cd $MICROPYTHON_PATH/ports/esp32
+          source $IDF_PATH/export.sh
+          
+          # Clean previous builds
+          make clean BOARD=$BOARD
+          
+          # Build with ADF support
+          make BOARD=$BOARD \
+               BUILD_TYPE=$BUILD_TYPE \
+               MICROPY_ESP_ADF=1 \
+               V=1
 
-      - name: Upload firmware.bin artifact
-        uses: actions/upload-artifact@v4
+      - name: Generate build info
+        run: |
+          cd $MICROPYTHON_PATH/ports/esp32
+          
+          BUILD_INFO="build_info_${{ matrix.target }}.txt"
+          
+          echo "ESP32 MicroPython ADF Build Information" > $BUILD_INFO
+          echo "=======================================" >> $BUILD_INFO
+          echo "Target: ${{ matrix.target }}" >> $BUILD_INFO
+          echo "Board: $BOARD" >> $BUILD_INFO
+          echo "Version: ${{ needs.setup.outputs.version }}" >> $BUILD_INFO
+          echo "Build Date: ${{ needs.setup.outputs.build_date }}" >> $BUILD_INFO
+          echo "Build Type: $BUILD_TYPE" >> $BUILD_INFO
+          echo "Git Commit: $GITHUB_SHA" >> $BUILD_INFO
+          echo "Git Ref: $GITHUB_REF" >> $BUILD_INFO
+          echo "" >> $BUILD_INFO
+          echo "Build Environment:" >> $BUILD_INFO
+          echo "ESP-IDF Version: $(cd $IDF_PATH && git describe --tags)" >> $BUILD_INFO
+          echo "ESP-ADF Version: $(cd $ADF_PATH && git describe --tags)" >> $BUILD_INFO
+          echo "MicroPython Version: $(cd $MICROPYTHON_PATH && git describe --tags)" >> $BUILD_INFO
+          
+          # Get firmware size info
+          if [ -f "build-$BOARD/firmware.bin" ]; then
+            echo "" >> $BUILD_INFO
+            echo "Firmware Information:" >> $BUILD_INFO
+            echo "Firmware Size: $(stat -c%s build-$BOARD/firmware.bin) bytes" >> $BUILD_INFO
+            echo "Bootloader Size: $(stat -c%s build-$BOARD/bootloader/bootloader.bin) bytes" >> $BUILD_INFO
+            echo "Partition Table Size: $(stat -c%s build-$BOARD/partition_table/partition-table.bin) bytes" >> $BUILD_INFO
+          fi
+
+      - name: Create release package
+        run: |
+          cd $MICROPYTHON_PATH/ports/esp32
+          
+          PACKAGE_NAME="micropython-adf-${{ matrix.target }}-${{ needs.setup.outputs.version }}"
+          mkdir -p $PACKAGE_NAME
+          
+          # Copy firmware files
+          if [ -d "build-$BOARD" ]; then
+            cp build-$BOARD/firmware.bin $PACKAGE_NAME/
+            cp build-$BOARD/bootloader/bootloader.bin $PACKAGE_NAME/
+            cp build-$BOARD/partition_table/partition-table.bin $PACKAGE_NAME/
+            
+            # Copy additional files if they exist
+            [ -f build-$BOARD/micropython.elf ] && cp build-$BOARD/micropython.elf $PACKAGE_NAME/
+            [ -f build-$BOARD/micropython.map ] && cp build-$BOARD/micropython.map $PACKAGE_NAME/
+          fi
+          
+          # Copy build info
+          cp build_info_${{ matrix.target }}.txt $PACKAGE_NAME/
+          
+          # Create flash script
+          cat > $PACKAGE_NAME/flash.sh << 'EOF'
+          #!/bin/bash
+          # Flash script for ESP32 MicroPython ADF firmware
+          
+          PORT=${1:-/dev/ttyUSB0}
+          BAUD=${2:-460800}
+          
+          echo "Flashing ESP32 MicroPython ADF firmware..."
+          echo "Port: $PORT, Baud: $BAUD"
+          
+          esptool.py --chip esp32 --port $PORT --baud $BAUD write_flash \
+            0x1000 bootloader.bin \
+            0x8000 partition-table.bin \
+            0x10000 firmware.bin
+          
+          echo "Flash complete!"
+          EOF
+          
+          chmod +x $PACKAGE_NAME/flash.sh
+          
+          # Create README
+          cat > $PACKAGE_NAME/README.md << EOF
+          # ESP32 MicroPython ADF Firmware
+          
+          This package contains the MicroPython firmware with ESP-ADF support for ${{ matrix.target }}.
+          
+          ## Files
+          - \`firmware.bin\`: Main MicroPython firmware
+          - \`bootloader.bin\`: ESP32 bootloader
+          - \`partition-table.bin\`: Partition table
+          - \`flash.sh\`: Flash script for easy installation
+          - \`build_info_${{ matrix.target }}.txt\`: Build information
+          
+          ## Flashing
+          
+          ### Using the flash script:
+          \`\`\`bash
+          ./flash.sh [port] [baudrate]
+          # Example: ./flash.sh /dev/ttyUSB0 460800
+          \`\`\`
+          
+          ### Using esptool directly:
+          \`\`\`bash
+          esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 write_flash \\
+            0x1000 bootloader.bin \\
+            0x8000 partition-table.bin \\
+            0x10000 firmware.bin
+          \`\`\`
+          
+          ## Build Information
+          - Target: ${{ matrix.target }}
+          - Version: ${{ needs.setup.outputs.version }}
+          - Build Date: ${{ needs.setup.outputs.build_date }}
+          - Build Type: $BUILD_TYPE
+          EOF
+          
+          # Create archive
+          tar -czf ${PACKAGE_NAME}.tar.gz $PACKAGE_NAME
+          zip -r ${PACKAGE_NAME}.zip $PACKAGE_NAME
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
         with:
-          name: firmware
-          path: build/firmware.bin
+          name: micropython-adf-${{ matrix.target }}-${{ needs.setup.outputs.version }}
+          path: |
+            ${{ env.MICROPYTHON_PATH }}/ports/esp32/micropython-adf-${{ matrix.target }}-${{ needs.setup.outputs.version }}.tar.gz
+            ${{ env.MICROPYTHON_PATH }}/ports/esp32/micropython-adf-${{ matrix.target }}-${{ needs.setup.outputs.version }}.zip
+          retention-days: 30
+
+      - name: Upload firmware files
+        uses: actions/upload-artifact@v3
+        with:
+          name: firmware-${{ matrix.target }}-${{ needs.setup.outputs.version }}
+          path: |
+            ${{ env.MICROPYTHON_PATH }}/ports/esp32/build-${{ env.BOARD }}/*.bin
+            ${{ env.MICROPYTHON_PATH }}/ports/esp32/build-${{ env.BOARD }}/*.elf
+            ${{ env.MICROPYTHON_PATH }}/ports/esp32/build-${{ env.BOARD }}/*.map
+            ${{ env.MICROPYTHON_PATH }}/ports/esp32/build_info_${{ matrix.target }}.txt
+          retention-days: 30
+
+  release:
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: ESP32 MicroPython ADF v${{ needs.setup.outputs.version }}
+          body: |
+            ## ESP32 MicroPython ADF Firmware Release
+            
+            **Version:** ${{ needs.setup.outputs.version }}
+            **Build Date:** ${{ needs.setup.outputs.build_date }}
+            **Commit:** ${{ github.sha }}
+            
+            ### Features
+            - MicroPython with ESP-ADF audio framework support
+            - Support for ESP32, ESP32-S2, ESP32-S3, and ESP32-C3
+            - Audio codec, audio processing, and streaming capabilities
+            - Ready-to-flash firmware packages
+            
+            ### Supported Boards
+            - ESP32 (Generic)
+            - ESP32-S2 (Generic)
+            - ESP32-S3 (Generic)
+            - ESP32-C3 (Generic)
+            
+            ### Installation
+            1. Download the appropriate firmware package for your board
+            2. Extract the archive
+            3. Run the included flash script or use esptool manually
+            4. Connect to the board via serial and enjoy MicroPython with ADF!
+            
+            ### Changes
+            See the commit history for detailed changes in this release.
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+          draft: false
+          prerelease: contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  cleanup:
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Clean up old artifacts
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { data: artifacts } = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            });
+            
+            const cutoff = new Date();
+            cutoff.setDate(cutoff.getDate() - 7); // Keep artifacts for 7 days
+            
+            for (const artifact of artifacts.artifacts) {
+              if (new Date(artifact.created_at) < cutoff && !artifact.name.includes('release')) {
+                console.log(`Deleting artifact: ${artifact.name}`);
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id
+                });
+              }
+            }
